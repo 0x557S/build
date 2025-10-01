@@ -1,0 +1,375 @@
+name: TR3000-112M
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: 'OpenWrt Repository URL'
+        required: true
+        default: 'https://github.com/immortalwrt/immortalwrt'
+      repo_branch:
+        description: 'Repository Branch'
+        required: true
+        default: 'master'
+      custom_feeds:
+        description: 'Custom feeds.conf.default content (optional)'
+        required: false
+      custom_config:
+        description: 'Custom .config content (optional)'
+        required: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  TZ: Asia/Shanghai
+  # Optimization flags
+  ENABLE_CCACHE: true
+  ENABLE_MOLD_LINKER: true
+  ENABLE_ZSTD_COMPRESS: true
+  CCACHE_SIZE: 8G
+  PARALLEL_DOWNLOADS: 16
+  COMPILE_THREADS_MULTIPLIER: 2  # $(nproc) * 2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Free Up GitHub Actions Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Maximize Build Space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 4096
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: Setup Build Environment Cache
+      uses: actions/cache@v4
+      id: cache-env
+      with:
+        path: |
+          /opt/build-cache
+          ~/.ccache
+        key: openwrt-build-env-${{ runner.os }}-${{ hashFiles('**/feeds.conf.default') }}
+        restore-keys: |
+          openwrt-build-env-${{ runner.os }}-
+
+    - name: Install Dependencies
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # Use parallel downloads for apt
+        echo 'Acquire::Queue-Mode "access";' | sudo tee /etc/apt/apt.conf.d/99parallel
+        echo 'APT::Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99parallel
+
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
+          gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 \
+          libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+          libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev \
+          lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf \
+          python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
+          xmlto xxd zlib1g-dev zstd pigz
+
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+
+        # Install latest mold linker for faster linking
+        MOLD_VERSION=$(curl -s https://api.github.com/repos/rui314/mold/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+        wget -q https://github.com/rui314/mold/releases/download/${MOLD_VERSION}/mold-${MOLD_VERSION#v}-x86_64-linux.tar.gz
+        sudo tar -xzf mold-*.tar.gz -C /usr/local --strip-components=1
+        rm mold-*.tar.gz
+
+        # Verify installations
+        ccache --version
+        mold --version
+
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: openwrt-ccache-${{ github.event.inputs.repo_branch }}-${{ hashFiles('**/Config.in') }}
+        restore-keys: |
+          openwrt-ccache-${{ github.event.inputs.repo_branch }}-
+          openwrt-ccache-
+        max-size: 8G
+        append-timestamp: false
+
+    - name: Cache OpenWrt Source
+      id: cache-source
+      uses: actions/cache@v4
+      with:
+        path: openwrt
+        key: openwrt-source-${{ github.event.inputs.repo_url }}-${{ github.event.inputs.repo_branch }}-${{ github.run_id }}
+        restore-keys: |
+          openwrt-source-${{ github.event.inputs.repo_url }}-${{ github.event.inputs.repo_branch }}-
+
+    - name: Clone OpenWrt Source
+      if: steps.cache-source.outputs.cache-hit != 'true'
+      run: |
+        df -h
+        git clone --depth 1 --single-branch --filter=blob:none \
+          -b ${{ github.event.inputs.repo_branch }} \
+          ${{ github.event.inputs.repo_url }} openwrt
+
+    - name: Update Existing Source
+      if: steps.cache-source.outputs.cache-hit == 'true'
+      run: |
+        cd openwrt
+        git fetch --depth 1 origin ${{ github.event.inputs.repo_branch }}
+        git reset --hard FETCH_HEAD
+
+    - name: Set Environment
+      run: |
+        echo "OPENWRT_PATH=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
+
+    - name: Apply Custom Feeds Configuration
+      run: |
+        cd openwrt
+        if [ -n "${{ github.event.inputs.custom_feeds }}" ]; then
+          echo "${{ github.event.inputs.custom_feeds }}" > feeds.conf.default
+        elif [ -f "$GITHUB_WORKSPACE/feeds.conf.default" ]; then
+          cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
+        fi
+        cat feeds.conf.default
+
+    - name: Run Custom Script (Part 1)
+      run: |
+        if [ -f "$GITHUB_WORKSPACE/custom-script.sh" ]; then
+          chmod +x $GITHUB_WORKSPACE/custom-script.sh
+          cd openwrt
+          $GITHUB_WORKSPACE/custom-script.sh
+        else
+          echo "No custom script found, skipping..."
+        fi
+
+    - name: Cache Feeds
+      id: cache-feeds
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/feeds
+          openwrt/package/feeds
+        key: openwrt-feeds-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        restore-keys: |
+          openwrt-feeds-${{ github.event.inputs.repo_branch }}-
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a -j$(nproc)
+        ./scripts/feeds install -a -j$(nproc)
+
+    - name: Apply Custom Configuration
+      run: |
+        cd openwrt
+        if [ -n "${{ github.event.inputs.custom_config }}" ]; then
+          echo "${{ github.event.inputs.custom_config }}" > .config
+        elif [ -f "$GITHUB_WORKSPACE/.config" ]; then
+          cp $GITHUB_WORKSPACE/.config .config
+        fi
+        make defconfig
+
+    - name: Pre-download Toolchain
+      run: |
+        cd openwrt
+        make toolchain/install -j$(nproc) BUILD_LOG=1 || true
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        # Parallel download with retries
+        make download -j16 V=s DOWNLOAD_ATTEMPTS=5
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Cache Downloaded Packages
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: openwrt-dl-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          openwrt-dl-${{ github.event.inputs.repo_branch }}-
+
+    - name: Cache Build Directory
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/build_dir/host
+          openwrt/build_dir/hostpkg
+          openwrt/staging_dir/host
+          openwrt/staging_dir/hostpkg
+        key: openwrt-staging-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          openwrt-staging-${{ github.event.inputs.repo_branch }}-
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo "Building with $(nproc) threads"
+
+        # Optimize compilation flags
+        export PATH="/usr/lib/ccache:$PATH"
+        export CCACHE_DIR=~/.ccache
+        export CCACHE_COMPRESS=1
+        export CCACHE_COMPRESSLEVEL=6
+        export FORCE_UNSAFE_CONFIGURE=1
+
+        # Use mold linker if available (faster than ld)
+        if command -v mold &> /dev/null; then
+          export LDFLAGS="-fuse-ld=mold"
+        fi
+
+        # Parallel make with aggressive threading
+        make -j$(($(nproc)*2)) \
+          IGNORE_ERRORS='' \
+          BUILD_LOG=1 \
+          || make -j1 V=s
+
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "compile_time=$(date +"%Y%m%d_%H%M%S")" >> $GITHUB_OUTPUT
+
+        # Extract device name
+        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | \
+          sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n1)
+        echo "device_name=${DEVICE_NAME:-unknown}" >> $GITHUB_OUTPUT
+
+    - name: Check Disk Space
+      if: always()
+      run: df -h
+
+    - name: Organize Firmware Files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+
+        # Further compress images using zstd for faster upload
+        for img in *.img *.bin; do
+          if [ -f "$img" ] && [[ ! "$img" =~ \.zst$ ]]; then
+            echo "Compressing $img with zstd..."
+            zstd -19 --rm -T0 "$img" || true
+          fi
+        done
+
+        echo "firmware_path=$PWD" >> $GITHUB_OUTPUT
+        ls -lh
+
+        # Generate detailed build info
+        cat > build-info.txt << EOF
+        Build Date: $(date '+%Y-%m-%d %H:%M:%S %Z')
+        Source: ${{ github.event.inputs.repo_url }}
+        Branch: ${{ github.event.inputs.repo_branch }}
+        Device: ${{ steps.compile.outputs.device_name }}
+        Commit: $(cd $GITHUB_WORKSPACE/openwrt && git rev-parse --short HEAD)
+        Workflow: ${{ github.workflow }} #${{ github.run_number }}
+        Builder: GitHub Actions (ubuntu-latest)
+        Compiler: $(gcc --version | head -n1)
+        Ccache Stats: $(ccache -s | grep -E 'cache hit|cache miss' || echo 'N/A')
+        EOF
+
+        # Generate checksums
+        sha256sum * > sha256sums.txt 2>/dev/null || true
+
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware to Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success'
+      with:
+        name: OpenWrt_${{ steps.compile.outputs.device_name }}_${{ steps.compile.outputs.compile_time }}
+        path: ${{ steps.organize.outputs.firmware_path }}
+        retention-days: 7
+        compression-level: 9
+
+    - name: Generate Release Tag and Notes
+      id: release_tag
+      if: steps.organize.outputs.status == 'success'
+      run: |
+        RELEASE_TAG="v$(date +"%Y.%m.%d-%H%M")"
+        echo "tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+
+        cat > release-notes.md << EOF
+        ## OpenWrt Firmware Release
+
+        **Build Date:** $(date '+%Y-%m-%d %H:%M:%S %Z')
+        **Device:** ${{ steps.compile.outputs.device_name }}
+        **Source:** [${{ github.event.inputs.repo_url }}](${{ github.event.inputs.repo_url }})
+        **Branch:** \`${{ github.event.inputs.repo_branch }}\`
+        **Commit:** \`$(cd openwrt && git rev-parse --short HEAD)\`
+
+        ### 📦 Files Included
+
+        $(cd ${{ steps.organize.outputs.firmware_path }} && ls -1 | sed 's/^/- /')
+
+        ### 🔧 Build Information
+
+        - Workflow Run: #${{ github.run_number }}
+        - Compiler: GCC with ccache
+        - Build System: Ubuntu Latest (GitHub Actions)
+
+        ---
+        🤖 *Automated build by GitHub Actions*
+        EOF
+
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      if: steps.release_tag.outputs.status == 'success'
+      with:
+        tag_name: ${{ steps.release_tag.outputs.tag }}
+        name: OpenWrt ${{ steps.compile.outputs.device_name }} - ${{ steps.compile.outputs.compile_time }}
+        body_path: release-notes.md
+        files: |
+          ${{ steps.organize.outputs.firmware_path }}/*
+          ${{ steps.organize.outputs.firmware_path }}/build-info.txt
+        draft: false
+        prerelease: false
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Clean Up Old Releases
+      uses: dev-drprasad/delete-older-releases@v0.3.4
+      if: steps.release_tag.outputs.status == 'success'
+      with:
+        keep_latest: 5
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Clean Up Old Workflow Runs
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Final Space Check
+      if: always()
+      run: |
+        echo "=== Final Disk Space ==="
+        df -h
+        echo "=== ccache Statistics ==="
+        ccache -s || true
