@@ -16,7 +16,8 @@ on:
         required: false
       custom_config:
         description: 'Custom .config content (optional)'
-        required: false
+        required: true
+        default: 'TR3000-112M.config'
 
 permissions:
   contents: write
