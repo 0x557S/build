@@ -43,20 +43,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-
-    - name: Free Up GitHub Actions Space
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
     - name: Maximize Build Space
       uses: easimon/maximize-build-space@master
       with:
@@ -68,6 +54,20 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
+
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Free Up GitHub Actions Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: false
+        swap-storage: false
 
 
     - name: Additional Space Cleanup
