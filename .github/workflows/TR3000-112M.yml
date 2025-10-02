@@ -1,4 +1,4 @@
-name: Modern OpenWrt Builder
+name: OpenWrt Builder
 
 on:
   workflow_dispatch:
@@ -11,11 +11,18 @@ on:
         description: 'Repository Branch'
         required: true
         default: 'master'
-      use_repo_config:
-        description: 'Use config files from repository (feeds.conf.default and .config)'
-        type: boolean
-        required: false
-        default: true
+      config_file:
+        description: 'Config file name in repository (e.g., .config, x86.config)'
+        required: true
+        default: '.config'
+      feeds_file:
+        description: 'Feeds file name in repository (leave empty for OpenWrt default)'
+        required: true
+        default: 'feeds.conf.default'
+      custom_script:
+        description: 'Custom script file name (leave empty to skip)'
+        required: true
+        default: 'custom-script.sh'
 
 permissions:
   contents: write
@@ -156,23 +163,29 @@ jobs:
     - name: Apply Custom Feeds Configuration
       run: |
         cd openwrt
-        if [ "${{ github.event.inputs.use_repo_config }}" = "true" ] && [ -f "$GITHUB_WORKSPACE/feeds.conf.default" ]; then
-          echo "Using feeds.conf.default from repository"
-          cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
+        FEEDS_FILE="${{ github.event.inputs.feeds_file }}"
+
+        if [ -n "$FEEDS_FILE" ] && [ -f "$GITHUB_WORKSPACE/$FEEDS_FILE" ]; then
+          echo "✅ Using feeds file: $FEEDS_FILE"
+          cp "$GITHUB_WORKSPACE/$FEEDS_FILE" feeds.conf.default
         else
-          echo "Using default feeds.conf.default from OpenWrt source"
+          echo "ℹ️  Using default feeds.conf.default from OpenWrt source"
         fi
+
         echo "=== feeds.conf.default ==="
         cat feeds.conf.default
 
-    - name: Run Custom Script (Part 1)
+    - name: Run Custom Script
       run: |
-        if [ -f "$GITHUB_WORKSPACE/custom-script.sh" ]; then
-          chmod +x $GITHUB_WORKSPACE/custom-script.sh
+        SCRIPT_FILE="${{ github.event.inputs.custom_script }}"
+
+        if [ -n "$SCRIPT_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SCRIPT_FILE" ]; then
+          echo "✅ Running custom script: $SCRIPT_FILE"
+          chmod +x "$GITHUB_WORKSPACE/$SCRIPT_FILE"
           cd openwrt
-          $GITHUB_WORKSPACE/custom-script.sh
+          "$GITHUB_WORKSPACE/$SCRIPT_FILE"
         else
-          echo "No custom script found, skipping..."
+          echo "ℹ️  No custom script specified or file not found, skipping..."
         fi
 
     - name: Cache Feeds
@@ -195,14 +208,23 @@ jobs:
     - name: Apply Custom Configuration
       run: |
         cd openwrt
-        if [ "${{ github.event.inputs.use_repo_config }}" = "true" ] && [ -f "$GITHUB_WORKSPACE/.config" ]; then
-          echo "Using .config from repository"
-          cp $GITHUB_WORKSPACE/.config .config
-        else
-          echo "ERROR: No .config file found!"
-          echo "Please add .config file to repository root or disable 'use_repo_config'"
+        CONFIG_FILE="${{ github.event.inputs.config_file }}"
+
+        if [ -z "$CONFIG_FILE" ]; then
+          echo "❌ ERROR: No config file specified!"
+          echo "Please provide a config file name (e.g., .config, tr3000.config)"
           exit 1
         fi
+
+        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "❌ ERROR: Config file not found: $CONFIG_FILE"
+          echo "Available files in repository:"
+          ls -la $GITHUB_WORKSPACE/*.config 2>/dev/null || echo "No .config files found"
+          exit 1
+        fi
+
+        echo "✅ Using config file: $CONFIG_FILE"
+        cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
 
         echo "=== .config preview (first 50 lines) ==="
         head -50 .config
