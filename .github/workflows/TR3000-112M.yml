@@ -1,4 +1,4 @@
-name: TR3K-112M
+name: Modern OpenWrt Builder
 
 on:
   workflow_dispatch:
@@ -11,13 +11,11 @@ on:
         description: 'Repository Branch'
         required: true
         default: 'master'
-      custom_feeds:
-        description: 'Custom feeds.conf.default content (optional)'
+      use_repo_config:
+        description: 'Use config files from repository (feeds.conf.default and .config)'
+        type: boolean
         required: false
-      custom_config:
-        description: 'Custom .config content (optional)'
-        required: true
-        default: 'TR3000-112M.config'
+        default: true
 
 permissions:
   contents: write
@@ -115,15 +113,17 @@ jobs:
         ccache --version
         mold --version
 
+        # Setup ccache directory
+        mkdir -p ~/.ccache
+
     - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
+      uses: actions/cache@v4
       with:
-        key: openwrt-ccache-${{ github.event.inputs.repo_branch }}-${{ hashFiles('**/Config.in') }}
+        path: ~/.ccache
+        key: ccache-${{ github.event.inputs.repo_branch }}-${{ github.run_number }}
         restore-keys: |
-          openwrt-ccache-${{ github.event.inputs.repo_branch }}-
-          openwrt-ccache-
-        max-size: 8G
-        append-timestamp: false
+          ccache-${{ github.event.inputs.repo_branch }}-
+          ccache-
 
     - name: Cache OpenWrt Source
       id: cache-source
@@ -156,11 +156,13 @@ jobs:
     - name: Apply Custom Feeds Configuration
       run: |
         cd openwrt
-        if [ -n "${{ github.event.inputs.custom_feeds }}" ]; then
-          echo "${{ github.event.inputs.custom_feeds }}" > feeds.conf.default
-        elif [ -f "$GITHUB_WORKSPACE/feeds.conf.default" ]; then
+        if [ "${{ github.event.inputs.use_repo_config }}" = "true" ] && [ -f "$GITHUB_WORKSPACE/feeds.conf.default" ]; then
+          echo "Using feeds.conf.default from repository"
           cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
+        else
+          echo "Using default feeds.conf.default from OpenWrt source"
         fi
+        echo "=== feeds.conf.default ==="
         cat feeds.conf.default
 
     - name: Run Custom Script (Part 1)
@@ -193,12 +195,22 @@ jobs:
     - name: Apply Custom Configuration
       run: |
         cd openwrt
-        if [ -n "${{ github.event.inputs.custom_config }}" ]; then
-          echo "${{ github.event.inputs.custom_config }}" > .config
-        elif [ -f "$GITHUB_WORKSPACE/.config" ]; then
+        if [ "${{ github.event.inputs.use_repo_config }}" = "true" ] && [ -f "$GITHUB_WORKSPACE/.config" ]; then
+          echo "Using .config from repository"
           cp $GITHUB_WORKSPACE/.config .config
+        else
+          echo "ERROR: No .config file found!"
+          echo "Please add .config file to repository root or disable 'use_repo_config'"
+          exit 1
         fi
+
+        echo "=== .config preview (first 50 lines) ==="
+        head -50 .config
+
         make defconfig
+
+        echo "=== Target device ==="
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config || echo "No specific device selected"
 
     - name: Pre-download Toolchain
       run: |
