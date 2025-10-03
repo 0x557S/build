@@ -163,19 +163,6 @@ jobs:
         echo "=== feeds.conf.default ==="
         cat feeds.conf.default
 
-    - name: Run Custom Script
-      run: |
-        SCRIPT_FILE="${{ github.event.inputs.custom_script }}"
-
-        if [ -n "$SCRIPT_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SCRIPT_FILE" ]; then
-          echo "✅ Running custom script: $SCRIPT_FILE"
-          chmod +x "$GITHUB_WORKSPACE/$SCRIPT_FILE"
-          cd openwrt
-          "$GITHUB_WORKSPACE/$SCRIPT_FILE"
-        else
-          echo "ℹ️  No custom script specified or file not found, skipping..."
-        fi
-
     - name: Cache Feeds
       id: cache-feeds
       uses: actions/cache@v4
@@ -269,6 +256,19 @@ jobs:
 
         echo "Disk space after cleanup:"
         df -h
+
+    - name: Run Custom Script
+      run: |
+        SCRIPT_FILE="${{ github.event.inputs.custom_script }}"
+
+        if [ -n "$SCRIPT_FILE" ] && [ -f "$GITHUB_WORKSPACE/$SCRIPT_FILE" ]; then
+          echo "✅ Running custom script: $SCRIPT_FILE"
+          chmod +x "$GITHUB_WORKSPACE/$SCRIPT_FILE"
+          cd openwrt
+          "$GITHUB_WORKSPACE/$SCRIPT_FILE"
+        else
+          echo "ℹ️  No custom script specified or file not found, skipping..."
+        fi
 
     - name: Compile Firmware
       id: compile
