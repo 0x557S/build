@@ -17,12 +17,7 @@ echo "Git commit: $(git rev-parse --short HEAD)"
 # Example: Add custom feed
 # echo "src-git custom https://github.com/user/custom-packages.git" >> feeds.conf.default
 
-# Example: Modify kernel configuration
-if [ -f "target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts" ]; then
-     echo "Modifying device tree for Cudy TR3000..."
-     sed -i '/reg = <0x4000000/s/0x4000000/0x7000000/' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
-fi
-
+sed -i 's/0x4000000/0x7000000/g' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
 sed -i 's/192.168.1.1/192.168.30.1/g' package/base-files/files/bin/config_generate
 sed -i 's/ImmortalWrt/ASUS/g' package/base-files/files/bin/config_generate
 sed -i 's|/bin/login|/bin/login -f root|g' feeds/packages/utils/ttyd/files/ttyd.config
@@ -33,7 +28,7 @@ pushd package/luci-app-change-mac
 umask 022
 git checkout
 popd
-
+sed -n -e '20p' -e '25p' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
 # Example: Apply patches
 # PATCH_DIR="${GITHUB_WORKSPACE}/patches"
 # if [ -d "$PATCH_DIR" ]; then
