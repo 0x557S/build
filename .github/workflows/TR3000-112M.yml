@@ -413,8 +413,9 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Clean Up Old Releases
-      uses: dev-drprasad/delete-older-releases@v0.3.4
+      uses: dev-drprasad/delete-older-releases@v0.3.5
       if: steps.release_tag.outputs.status == 'success'
+      continue-on-error: true
       with:
         keep_latest: 5
         delete_tags: true
