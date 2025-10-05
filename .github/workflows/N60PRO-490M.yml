@@ -1,1 +1,373 @@
+name: N60PRO-490M ( Fast & Cached )
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: 'OpenWrt Repository URL'
+        required: true
+        default: 'https://github.com/immortalwrt/immortalwrt'
+      repo_branch:
+        description: 'Repository Branch'
+        required: true
+        default: 'master'
+      config_file:
+        description: 'Config file name in repository (e.g., .config, x86.config)'
+        required: true
+        default: 'N60PRO-490M.config'
+      feeds_file:
+        description: 'Feeds file name in repository (leave empty for OpenWrt default)'
+        required: true
+        default: 'feeds.conf.default'
+      custom_script:
+        description: 'Custom script file name (leave empty to skip)'
+        required: true
+        default: 'N60PRO-490M.sh'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: openwrt-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+  # Optimization flags
+  ENABLE_CCACHE: true
+  ENABLE_MOLD_LINKER: true
+  ENABLE_ZSTD_COMPRESS: true
+  CCACHE_SIZE: 8G
+  PARALLEL_DOWNLOADS: 16
+  COMPILE_THREADS_MULTIPLIER: 2  # $(nproc) * 2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Free Disk Space (minimal)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Install Build Dependencies (with mold & ccache)
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # Apt tuning
+        echo 'Acquire::Queue-Mode "access";' | sudo tee /etc/apt/apt.conf.d/99parallel
+        echo 'APT::Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99parallel
+
+        sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq update
+        sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
+          gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 \
+          libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+          libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev \
+          lld llvm mold lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf \
+          python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget \
+          xmlto xxd zlib1g-dev zstd pigz
+
+        sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq autoremove --purge
+        sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq clean
+        sudo timedatectl set-timezone "$TZ"
+
+        # Verify installations
+        ccache --version || true
+        mold --version || true
+
+        # Setup ccache directory
+        mkdir -p ~/.ccache
+
+    - name: Setup ccache cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ccache-${{ runner.os }}-${{ github.event.inputs.repo_url }}-${{ github.event.inputs.repo_branch }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ github.event.inputs.repo_url }}-
+          ccache-${{ runner.os }}-
+          ccache-
+
+    - name: Cache OpenWrt Source
+      id: cache-source
+      uses: actions/cache@v4
+      with:
+        path: openwrt
+        key: openwrt-source-${{ runner.os }}-${{ github.event.inputs.repo_url }}-${{ github.event.inputs.repo_branch }}
+        restore-keys: |
+          openwrt-source-${{ runner.os }}-${{ github.event.inputs.repo_url }}-
+          openwrt-source-${{ runner.os }}-
+
+    - name: Clone OpenWrt Source
+      if: steps.cache-source.outputs.cache-hit != 'true'
+      run: |
+        git clone --depth 1 --single-branch --filter=blob:none \
+          -b ${{ github.event.inputs.repo_branch }} \
+          ${{ github.event.inputs.repo_url }} openwrt
+
+    - name: Update Existing Source
+      if: steps.cache-source.outputs.cache-hit == 'true'
+      run: |
+        cd openwrt
+        git fetch --depth 1 origin ${{ github.event.inputs.repo_branch }}
+        git reset --hard FETCH_HEAD
+        # Remove untracked/ignored files from previous builds to keep repo clean and cache slim
+        git clean -fdx
+
+    - name: Set Environment
+      run: |
+        echo "OPENWRT_PATH=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
+
+    - name: Apply Custom Feeds Configuration
+      run: |
+        cd openwrt
+        FEEDS_FILE="${{ github.event.inputs.feeds_file }}"
+
+        if [ -n "$FEEDS_FILE" ] && [ -f "$GITHUB_WORKSPACE/$FEEDS_FILE" ]; then
+          echo "✅ Using feeds file: $FEEDS_FILE"
+          cp "$GITHUB_WORKSPACE/$FEEDS_FILE" feeds.conf.default
+        else
+          echo "ℹ️  Using default feeds.conf.default from OpenWrt source"
+        fi
+
+        echo "=== feeds.conf.default ==="
+        cat feeds.conf.default
+
+
+    - name: Cache Feeds
+      id: cache-feeds
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/feeds
+          openwrt/package/feeds
+        key: openwrt-feeds-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        restore-keys: |
+          openwrt-feeds-${{ github.event.inputs.repo_branch }}-
+
+    - name: Update & Install Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a -j$(nproc)
+        ./scripts/feeds install -a -j$(nproc)
+
+    - name: Apply Custom Configuration
+      run: |
+        cd openwrt
+        CONFIG_FILE="${{ github.event.inputs.config_file }}"
+
+        if [ -z "$CONFIG_FILE" ]; then
+          echo "❌ ERROR: No config file specified!"
+          echo "Please provide a config file name (e.g., .config, tr3000.config)"
+          exit 1
+        fi
+
+        if [ ! -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+          echo "❌ ERROR: Config file not found: $CONFIG_FILE"
+          echo "Available files in repository:"
+          ls -la $GITHUB_WORKSPACE/*.config 2>/dev/null || echo "No .config files found"
+          exit 1
+        fi
+
+        echo "✅ Using config file: $CONFIG_FILE"
+        cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+
+        make defconfig
+
+        echo "=== Target device ==="
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config || echo "No specific device selected"
+
+    - name: Pre-Download Space Guard (>=40G)
+      run: |
+        set -e
+        check_free_gb() {
+          df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2{printf "%d", $4/1024/1024}'
+        }
+        aggressive_cleanup() {
+          echo "[cleanup] Running aggressive cleanup to reclaim space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/graalvm /usr/local/share/powershell \
+                      /usr/share/swift /usr/local/.ghcup || true
+          sudo docker rmi $(docker images -q) 2>/dev/null || true
+          sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq autoremove --purge || true
+          sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq clean || true
+        }
+        BEFORE=$(check_free_gb)
+        echo "[space] Free before download: ${BEFORE}G"
+        if [ "${BEFORE}" -lt 40 ]; then
+          aggressive_cleanup
+          AFTER=$(check_free_gb)
+          echo "[space] Free after cleanup: ${AFTER}G"
+          if [ "${AFTER}" -lt 40 ]; then
+            echo "❌ ERROR: Not enough disk space before downloads (<40G). Current: ${AFTER}G" >&2
+            echo "Hint: reduce downloads or try again later." >&2
+            exit 1
+          fi
+        fi
+        df -h
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        # Parallel download with retries
+        make download -j${PARALLEL_DOWNLOADS:-16} V=s DOWNLOAD_ATTEMPTS=5
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Cache Downloaded Packages
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: openwrt-dl-${{ runner.os }}-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          openwrt-dl-${{ runner.os }}-${{ github.event.inputs.repo_branch }}-
+          openwrt-dl-${{ runner.os }}-
+
+    - name: Cache Build Directory (host/staging)
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/build_dir/host
+          openwrt/build_dir/hostpkg
+          openwrt/staging_dir/host
+          openwrt/staging_dir/hostpkg
+        key: openwrt-staging-${{ runner.os }}-${{ github.event.inputs.repo_branch }}-${{ hashFiles('openwrt/.config') }}
+        restore-keys: |
+          openwrt-staging-${{ runner.os }}-${{ github.event.inputs.repo_branch }}-
+          openwrt-staging-${{ runner.os }}-
+    - name: Pre-Compile Space Guard (>=30G)
+      run: |
+        set -e
+        check_free_gb() {
+          df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2{printf "%d", $4/1024/1024}'
+        }
+        aggressive_cleanup() {
+          echo "[cleanup] Running aggressive cleanup to reclaim space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/graalvm /usr/local/share/powershell \
+                      /usr/share/swift /usr/local/.ghcup || true
+          sudo docker rmi $(docker images -q) 2>/dev/null || true
+          sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq autoremove --purge || true
+          sudo -E apt-get -o=Dpkg::Use-Pty=0 -qq clean || true
+        }
+        BEFORE=$(check_free_gb)
+        echo "[space] Free before compile: ${BEFORE}G"
+        if [ "${BEFORE}" -lt 30 ]; then
+          aggressive_cleanup
+          AFTER=$(check_free_gb)
+          echo "[space] Free after cleanup: ${AFTER}G"
+          if [ "${AFTER}" -lt 30 ]; then
+            echo "[space] Space still low, applying conservative settings (ccache 4G, threads=nproc)"
+            echo "FORCED_THREADS=$(nproc)" >> $GITHUB_ENV
+            ccache -M 4G || true
+            echo "CCACHE_SIZE=4G" >> $GITHUB_ENV
+          fi
+          FINAL=$(check_free_gb)
+          if [ "${FINAL}" -lt 25 ]; then
+            echo "❌ ERROR: Not enough disk space to safely compile (<25G). Current: ${FINAL}G" >&2
+            echo "Hint: reduce packages/targets, or re-run later on a less busy runner." >&2
+            exit 1
+          fi
+        fi
+        echo "[space] Workspace usage:" && df -h
+        echo "[space] OpenWrt tree size:" && du -sh "$GITHUB_WORKSPACE/openwrt" || true
+
+    - name: Run Custom Script (strict)
+      run: |
+        SCRIPT_FILE="${{ github.event.inputs.custom_script }}"
+        if [ -n "$SCRIPT_FILE" ]; then
+          if [ -f "$GITHUB_WORKSPACE/$SCRIPT_FILE" ]; then
+            echo "✅ Running custom script: $SCRIPT_FILE"
+            chmod +x "$GITHUB_WORKSPACE/$SCRIPT_FILE"
+            cd openwrt
+            "$GITHUB_WORKSPACE/$SCRIPT_FILE"
+          else
+            echo "❌ ERROR: custom script specified but not found: $SCRIPT_FILE" >&2
+            echo "Hint: upload the script to repo root or leave input empty to skip." >&2
+            exit 1
+          fi
+        else
+          echo "ℹ️  No custom script specified; skipping."
+        fi
+
+    - name: Compile Firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo "Building with $(nproc) threads"
+        echo "Current directory space:"
+        df -h .
+
+        # Optimize compilation flags
+        export PATH="/usr/lib/ccache:$PATH"
+        export CCACHE_DIR=~/.ccache
+        export CCACHE_COMPRESS=1
+        export CCACHE_COMPRESSLEVEL=6
+        export FORCE_UNSAFE_CONFIGURE=1
+        ccache -M ${CCACHE_SIZE:-8G} || true
+
+        # Use mold linker if available (faster than ld)
+        if command -v mold &> /dev/null; then
+          export LDFLAGS="-fuse-ld=mold"
+        fi
+
+        # Decide threads (prefer FORCED_THREADS set by space guard)
+        THREADS=${FORCED_THREADS:-$(( $(nproc) * ${COMPILE_THREADS_MULTIPLIER:-2} ))}
+        echo "[build] Using threads: ${THREADS}"
+        # Parallel make
+        make -j${THREADS} \
+          IGNORE_ERRORS='' \
+          BUILD_LOG=1 \
+          || {
+            echo "First attempt failed, cleaning up and retrying..."
+            rm -rf tmp/
+            make -j1 V=s
+          }
+
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "compile_time=$(date +"%Y%m%d_%H%M%S")" >> $GITHUB_OUTPUT
+
+        # Extract device name
+        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | \
+          sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n1)
+        echo "device_name=${DEVICE_NAME:-unknown}" >> $GITHUB_OUTPUT
+
+    - name: Organize Firmware Files
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+
+        FIRMWARE_PATH=$PWD
+        echo "firmware_path=$FIRMWARE_PATH" >> $GITHUB_OUTPUT
+        ls -lh
+
+        # Optional: Generate checksums
+        cd "$FIRMWARE_PATH"
+        sha256sum *.bin *.img 2>/dev/null > sha256sums.txt || true
+
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload Firmware to Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success'
+      with:
+        name: OpenWrt_${{ steps.compile.outputs.device_name }}_${{ steps.compile.outputs.compile_time }}
+        path: ${{ steps.organize.outputs.firmware_path }}
+        retention-days: 7
+        compression-level: 9
 
