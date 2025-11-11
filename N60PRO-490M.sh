@@ -59,12 +59,7 @@ git_clone_retry() {
 # echo "src-git custom https://github.com/user/custom-packages.git" >> feeds.conf.default
 
 # Example: Modify kernel/device configuration
-if [[ -f "target/linux/mediatek/dts/mt7986a-netcore-n60-pro.dts" ]]; then
-  log "Modifying device tree for netcore-n60-pro..."
-  sed -i '/reg = <0x0580000/s/0x7a80000/0x1ea00000/' target/linux/mediatek/dts/mt7986a-netcore-n60-pro.dts
-else
-  warn "Device tree not found: target/linux/mediatek/dts/mt7986a-netcore-n60-pro.dts"
-fi
+sed -i 's/0x7a80000/0x1ea00000/g' target/linux/mediatek/dts/mt7986a-netcore-n60-pro.dts
 
 safe_sed 's/192.168.1.1/192.168.6.1/g' package/base-files/files/bin/config_generate
 safe_sed 's/ImmortalWrt/N1/g' package/base-files/files/bin/config_generate
