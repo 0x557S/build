@@ -60,32 +60,7 @@ git_clone_retry() {
 
 # Example: Modify kernel/device configuration
 # --- begin: 修改 &ubi reg 长度为 0x7000000 ---
-file="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts"
-new="0x7000000"
-
-if [[ -f "$file" ]]; then
-  # 仅在 &ubi {...} 块内替换 reg = <offset oldlen> 的 oldlen 为 new
-  awk -v new="$new" '
-    BEGIN{in_ubi=0}
-    /&ubi[[:space:]]*\{/ { in_ubi=1; print; next }
-    in_ubi && /\}/ { in_ubi=0; print; next }
-    in_ubi && /reg[[:space:]]*=.*</ {
-      # 将最右边的十六进制数（假设为长度）替换为 new
-      sub(/0x[0-9A-Fa-f]+\s*>(;)?/, new " >\\1")
-      print; next
-    }
-    { print }
-  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-
-  if grep -qP '&ubi\s*\{[^\}]*reg\s*=\s*<[^>]*\K0x7000000(?=[^>]*>;)' "$file"; then
-    echo "Modified: $new set in $file"
-    grep -n "reg *= *<" "$file"
-  else
-    echo "Modification failed" >&2
-  fi
-else
-  echo "File not found: $file" >&2
-fi
+sed -i 's/0x4000000/0x7000000/g' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
 # --- end ---
 
 safe_sed 's/192.168.1.1/192.168.30.1/g' package/base-files/files/bin/config_generate
@@ -105,7 +80,8 @@ if [[ -d package/luci-app-change-mac/.git ]]; then
 else
   warn "package/luci-app-change-mac not a git repo; skip checkout"
 fi
-sed -n -e '20p' -e '25p' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
+sed -n '25p' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
+sed -n -e '24p' -e '26p' target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dts
 # Example: Apply patches (optional)
 # PATCH_DIR="${GITHUB_WORKSPACE}/patches"
 # if [[ -d "$PATCH_DIR" ]]; then
